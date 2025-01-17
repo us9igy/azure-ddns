@@ -3,10 +3,6 @@ using namespace System.Net
 # Input bindings are passed in via param block.
 param($Request, $TriggerMetadata)
 
-if ($env:IsDebugEnabled) {
-    Wait-Debugger
-}
-
 $authHeader = $Request.Headers.Authorization
 if(-not $authHeader -or -not $authHeader.startsWith("Basic ")) {
     Write-Error "The Basic authorization header was not provided in the request."
@@ -97,19 +93,11 @@ Write-Debug "Name: $dnsName"
 Write-Debug "DNS Zone: $zoneName"
 Write-Debug "Resource Group: $dnsZoneRGName"
 
-$rs = Get-AzDnsRecordSet -ResourceGroupName $dnsZoneRGName -ZoneName $zoneName -Name $dnsName -RecordType A
+$zone = Get-AzDnsZone -Name $hostname -ResourceGroupName $dnsZoneRGName
+$rs = Get-AzDnsRecordSet -Zone $zone | Where-Object { $_.RecordType -eq 'A' }
+
 if (-not $rs) {
-    Write-Error "Could not locate the DNS record '$dnsName' in zone '$zoneName'. Please check your Azure DNS configuration and try again."
-
-    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
-        StatusCode = [HttpStatusCode]::OK
-        Body = "nofqdn"
-    })
-
-    exit
-} elseif ($rs.TargetResourceId) {
-    # The recordset being used is an alias to another recordset, rather than the owner. Abort.
-    Write-Error "Could not update the DNS record '$dnsName' in zone '$zoneName' because it is an alias. Please check your Azure DNS configuration and try again."
+    Write-Error "Could not locate the DNS record '$dnsName.$zoneName'. Please check your Azure DNS configuration and try again."
 
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
         StatusCode = [HttpStatusCode]::OK
@@ -119,22 +107,20 @@ if (-not $rs) {
     exit
 }
 
-Write-Debug "Checking the existing records for zone '$zoneName'..."
+Write-Debug "Checking the existing records for zone '$dnsName.$zoneName'..."
 
 $found = $false
 $ipAddrsToRemove = @()
 
-foreach ($record in $rs.Records) {
-    if ($record.Ipv4Address -ne $ipAddr) {
-        Write-Debug "Found IP address $record.Ipv4Address which does not belong in the record set..."
-        $ipAddrsToRemove += $record.Ipv4Address
-    } else {
-        Write-Debug "Expected IP address already exists within the record set..."
-        $found = $true
-    }
+if ($rs.Records.Ipv4Address -ne $ipAddr) {
+    Write-Debug "Found IP address $rs.Records.Ipv4Address which does not belong in the record set..."
+    $ipAddrsToRemove += $rs.Records.Ipv4Address
+} else {
+    Write-Debug "Expected IP address already exists within the record set..."
+    $found = $true
 }
 
-Write-Information "Preparing to update the DNS zone '$zoneName' in Resource Group '$dnsZoneRGName'..."
+Write-Information "Preparing to update the DNS zone '$dnsName.$zoneName' in Resource Group '$dnsZoneRGName'..."
 $saveChanges = $false
 
 if ($ipAddrsToRemove.count -gt 0) {
@@ -142,7 +128,7 @@ if ($ipAddrsToRemove.count -gt 0) {
 
     foreach ($existingIpAddr in $ipAddrsToRemove) {
         Remove-AzDnsRecordConfig -RecordSet $rs -Ipv4Address $existingIpAddr
-        Write-Information "Removed IPv4 address '$existingIpAddr' from DNS zone: '$zoneName'."
+        Write-Information "Removed IPv4 address '$existingIpAddr' from DNS zone: '$dnsName.$zoneName'."
     }
 
     $saveChanges = $true
@@ -150,14 +136,14 @@ if ($ipAddrsToRemove.count -gt 0) {
 
 if (!$found) {
     Add-AzDnsRecordConfig -RecordSet $rs -Ipv4Address $ipAddr
-    Write-Information "Added new IPv4 Address '$ipAddr' to DNS zone '$zoneName'."
+    Write-Information "Added new IPv4 Address '$ipAddr' to DNS zone '$dnsName.$zoneName'."
 
     $saveChanges = $true
 }
 
 if ($saveChanges) {
     Set-AzDnsRecordSet -RecordSet $rs
-    Write-Information "Successfully updated DNS zone '$zoneName' in Resource Group '$dnsZoneRGName'."
+    Write-Information "Successfully updated DNS zone '$dnsName.$zoneName' in Resource Group '$dnsZoneRGName'."
     
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
         StatusCode = [HttpStatusCode]::OK
@@ -166,7 +152,7 @@ if ($saveChanges) {
 
     exit
 } else {
-    Write-Information "No change required for DNS zone '$zoneName' in Resource Group '$dnsZoneRGName'."
+    Write-Information "No change required for DNS zone '$dnsName.$zoneName' in Resource Group '$dnsZoneRGName'."
 
     Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
         StatusCode = [HttpStatusCode]::OK
